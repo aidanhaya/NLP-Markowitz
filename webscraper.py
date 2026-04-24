@@ -4,10 +4,14 @@ import time
 from datetime import datetime
 from playwright.sync_api import sync_playwright
 
-LISTING_URL = "https://www.fool.com/earnings-call-transcripts/"
+LISTING_PAGES = [
+    "https://www.fool.com/earnings-call-transcripts/",
+    "https://www.fool.com/earnings-call-transcripts/page/2/",
+]
 
-def scrape_all_transcripts(delay: float = 2.0):
+def scrape_all_transcripts(delay: float = 2.0) -> dict:
     results = {}
+    today = str(datetime.today().date())  # e.g. "2026-04-24"
 
     with sync_playwright() as p: # opens a playwright session
         # launches real Chromium browser
@@ -15,16 +19,7 @@ def scrape_all_transcripts(delay: float = 2.0):
         # opens Chromium browser tab
         page = browser.new_page()
 
-        # Step 1: Fetch the listing page and wait for JS to render links
-        page.goto(LISTING_URL, timeout=60000) # navigates to url, wait 60000ms = 60s
-        # pauses execution until a DOM element matching the CSS selector appears
-        page.wait_for_selector("a[href*='/earnings/call-transcripts/']", timeout=30000)
-        # BeautifulSoup object containing HTML page content
-        soup = BeautifulSoup(page.content(), "html.parser")
-
-        # Step 2: Find a transcript link containing the ticker
-        links = soup.find_all("a", href=True)
-        # regex expression to extract transcript hyperlinks and isolate tickers
+        # Step 1: Collect transcript links from both listing pages
         pattern = re.compile(
             r"/earnings/call-transcripts/\d{4}/\d{2}/\d{2}/"  # date path
             r"(?:[a-z0-9]+-)*"  # company name slug (non-capturing)
@@ -32,27 +27,37 @@ def scrape_all_transcripts(delay: float = 2.0):
             r"-q[1-4]-\d{4}"  # quarter + year
             r"-earnings(?:-call)?-transcript/"  # either format
         )
+        date_pattern = re.compile(r"/earnings/call-transcripts/(\d{4})/(\d{2})/(\d{2})/")
         seen_tickers = set()
-
         ticker_href_pairs = []
 
-        # runs through all found hyperlinks and only selects those with found tickers
-        for l in links:
-            href = l["href"]
-            # checks if hyperlink is a transcript
-            if "/earnings/call-transcripts/" not in href:
-                continue
-            # tries to match hyperlinks to extracted regex pattern
-            match = pattern.search(href)
-            if match:
-                ticker = match.group(1).lower() # extracts ticker (inside parentheses)
-                if ticker not in seen_tickers:
-                    seen_tickers.add(ticker)
-                    ticker_href_pairs.append((ticker, href))
+        for listing_url in LISTING_PAGES:
+            page.goto(listing_url, timeout=60000)
+            page.wait_for_selector("a[href*='/earnings/call-transcripts/']", timeout=30000)
+            soup = BeautifulSoup(page.content(), "html.parser")
 
-        print(f"Found {len(ticker_href_pairs)} tickers: {[t for t, _ in ticker_href_pairs]}")
+            for l in soup.find_all("a", href=True):
+                href = l["href"]
+                if "/earnings/call-transcripts/" not in href:
+                    continue
+                match = pattern.search(href)
+                if not match:
+                    continue
+                ticker = match.group(1).lower()
+                if ticker in seen_tickers:
+                    continue
+                # filter to today's transcripts only using the date in the URL
+                date_match = date_pattern.search(href)
+                if date_match:
+                    link_date = f"{date_match.group(1)}-{date_match.group(2)}-{date_match.group(3)}"
+                    if link_date != today:
+                        continue
+                seen_tickers.add(ticker)
+                ticker_href_pairs.append((ticker, href))
 
-        # Step 3: Visit each transcript page in the same browser session
+        print(f"Found {len(ticker_href_pairs)} tickers from today ({today}): {[t for t, _ in ticker_href_pairs]}")
+
+        # Step 2: Visit each transcript page in the same browser session
         for ticker, href in ticker_href_pairs:
             print(f"Scraping {ticker}...")
             try:
